@@ -6,10 +6,10 @@ import re
 from typing import Optional
 
 from .models import CrontabLine, LineType
+from .timezone import validate_timezone
 
 
 # Cron schedule patterns
-CRON_FIELD = r"(?:[\d\*,/\-]+|(?:@\w+))"
 FIVE_FIELD_RE = re.compile(
     r"^(\S+\s+\S+\s+\S+\s+\S+\s+\S+)\s+(.+)$"
 )
@@ -18,6 +18,22 @@ ENV_VAR_RE = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.*)$")
 DISABLED_CRON_RE = re.compile(r"^#\s*(" + r"\S+\s+\S+\s+\S+\s+\S+\s+\S+" + r")\s+(.+)$")
 DISABLED_SPECIAL_RE = re.compile(
     r"^#\s*(@(?:reboot|yearly|annually|monthly|weekly|daily|midnight|hourly))\s+(.+)$", re.IGNORECASE
+)
+
+# Valid cron field regex (strict)
+_CRON_TOKEN = (
+    r"(?:mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)"
+)
+_CRON_FIELD_RE = re.compile(
+    r"^(?:\*(?:/\d+)?|"
+    r"(?:\d+|" + _CRON_TOKEN + r")"
+    r"(?:-(?:\d+|" + _CRON_TOKEN + r"))?"
+    r"(?:/\d+)?"
+    r"(?:,(?:\d+|" + _CRON_TOKEN + r")"
+    r"(?:-(?:\d+|" + _CRON_TOKEN + r"))?"
+    r"(?:/\d+)?)*"
+    r")$",
+    re.IGNORECASE,
 )
 
 
@@ -57,6 +73,7 @@ def parse_crontab(text: str) -> list[CrontabLine]:
                 schedule=schedule,
                 command=command,
                 enabled=False,
+                _original_enabled=False,
                 comment_above=pending_comment,
             )
             pending_comment = None
@@ -74,6 +91,7 @@ def parse_crontab(text: str) -> list[CrontabLine]:
                     schedule=schedule,
                     command=command,
                     enabled=False,
+                    _original_enabled=False,
                     comment_above=pending_comment,
                 )
                 pending_comment = None
@@ -93,12 +111,18 @@ def parse_crontab(text: str) -> list[CrontabLine]:
         # Environment variable
         env_match = ENV_VAR_RE.match(stripped)
         if env_match and not _looks_like_cron_line(stripped):
+            env_name = env_match.group(1)
+            env_value = env_match.group(2)
+            tz_warning = None
+            if env_name in ("CRON_TZ", "TZ"):
+                tz_warning = validate_timezone(env_value)
             lines.append(CrontabLine(
                 raw=raw,
                 line_type=LineType.ENV_VAR,
                 line_number=line_num,
-                env_name=env_match.group(1),
-                env_value=env_match.group(2),
+                env_name=env_name,
+                env_value=env_value,
+                tz_warning=tz_warning,
             ))
             pending_comment = None
             continue
@@ -114,6 +138,7 @@ def parse_crontab(text: str) -> list[CrontabLine]:
                 schedule=schedule,
                 command=command,
                 enabled=True,
+                _original_enabled=True,
                 comment_above=pending_comment,
             )
             pending_comment = None
@@ -132,6 +157,7 @@ def parse_crontab(text: str) -> list[CrontabLine]:
                     schedule=schedule,
                     command=command,
                     enabled=True,
+                    _original_enabled=True,
                     comment_above=pending_comment,
                 )
                 pending_comment = None
@@ -166,15 +192,8 @@ def _is_valid_schedule(schedule: str) -> bool:
     parts = schedule.strip().split()
     if len(parts) != 5:
         return False
-    cron_field_re = re.compile(
-        r"^(?:\*|(?:\d+|(?:mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))"
-        r"(?:-(?:\d+|(?:mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)))?)"
-        r"(?:/\d+)?(?:,(?:\*|\d+|(?:mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec))"
-        r"(?:-(?:\d+|(?:mon|tue|wed|thu|fri|sat|sun|jan|feb|mar|apr|may|jun|jul|aug|sep|oct|nov|dec)))?(?:/\d+)?)*$",
-        re.IGNORECASE,
-    )
     for part in parts:
-        if not cron_field_re.match(part):
+        if not _CRON_FIELD_RE.match(part):
             return False
     return True
 

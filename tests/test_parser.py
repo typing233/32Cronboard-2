@@ -123,21 +123,92 @@ class TestParserLossless:
         assert lines2[0].command == "/usr/bin/backup.sh"
 
 
-class TestParserEdgeCases:
-    """Test edge cases in parsing."""
+class TestParserLosslessFormatting:
+    """Test that unmodified lines preserve exact original formatting."""
 
-    def test_tab_separated_fields(self):
-        text = "0\t2\t*\t*\t*\t/usr/bin/cmd\n"
+    def test_no_space_after_hash_preserved(self):
+        """#0 2 * * * cmd must round-trip exactly."""
+        text = "#0 2 * * * /usr/bin/cmd\n"
         lines = parse_crontab(text)
         assert len(lines) == 1
-        # Tabs are treated as whitespace in split
         assert lines[0].line_type == LineType.CRON_JOB
+        assert not lines[0].enabled
+        assert lines[0].schedule == "0 2 * * *"
+        assert lines[0].command == "/usr/bin/cmd"
+        # Unmodified: must preserve raw
+        output = serialize_crontab(lines)
+        assert output == text
 
-    def test_multiple_spaces_in_schedule(self):
+    def test_multiple_spaces_preserved(self):
+        """Multiple spaces between fields must be preserved if unmodified."""
         text = "0  2  *  *  *  /usr/bin/cmd\n"
         lines = parse_crontab(text)
         assert len(lines) == 1
+        assert lines[0].line_type == LineType.CRON_JOB
         assert lines[0].command == "/usr/bin/cmd"
+        # Unmodified: must preserve raw
+        output = serialize_crontab(lines)
+        assert output == text
+
+    def test_tab_separated_preserved(self):
+        """Tab-separated fields must be preserved if unmodified."""
+        text = "0\t2\t*\t*\t*\t/usr/bin/cmd\n"
+        lines = parse_crontab(text)
+        assert len(lines) == 1
+        assert lines[0].line_type == LineType.CRON_JOB
+        output = serialize_crontab(lines)
+        assert output == text
+
+    def test_disabled_no_space_preserved(self):
+        """#*/5 * * * * cmd (no space after #) must round-trip."""
+        text = "#*/5 * * * * /tmp/cleanup.sh\n"
+        lines = parse_crontab(text)
+        assert len(lines) == 1
+        assert lines[0].line_type == LineType.CRON_JOB
+        assert not lines[0].enabled
+        output = serialize_crontab(lines)
+        assert output == text
+
+    def test_modified_line_is_reconstructed(self):
+        """When schedule is changed, line is reconstructed."""
+        text = "0  2  *  *  *  /usr/bin/cmd\n"
+        lines = parse_crontab(text)
+        lines[0].schedule = "0 3 * * *"
+        lines[0].mark_modified()
+        output = serialize_crontab(lines)
+        assert output == "0 3 * * * /usr/bin/cmd\n"
+
+    def test_toggle_marks_modified(self):
+        """Toggling enabled/disabled flag causes reconstruction."""
+        text = "0 2 * * * /usr/bin/cmd\n"
+        lines = parse_crontab(text)
+        assert lines[0].enabled
+        lines[0].enabled = False
+        # is_modified detects enabled != _original_enabled
+        output = serialize_crontab(lines)
+        assert output == "# 0 2 * * * /usr/bin/cmd\n"
+
+    def test_re_enable_disabled_reconstructs(self):
+        """Re-enabling a disabled job reconstructs without the # prefix."""
+        text = "# 0 2 * * * /usr/bin/cmd\n"
+        lines = parse_crontab(text)
+        assert not lines[0].enabled
+        lines[0].enabled = True
+        output = serialize_crontab(lines)
+        assert output == "0 2 * * * /usr/bin/cmd\n"
+
+    def test_unmodified_disabled_preserves_format(self):
+        """A disabled line that stays disabled preserves original formatting."""
+        text = "#  0 2 * * * /usr/bin/cmd\n"
+        lines = parse_crontab(text)
+        assert not lines[0].enabled
+        # Don't toggle — stays disabled
+        output = serialize_crontab(lines)
+        assert output == text
+
+
+class TestParserEdgeCases:
+    """Test edge cases in parsing."""
 
     def test_command_with_env_like_syntax(self):
         """A command that looks like KEY=value but is actually a cron job."""
@@ -157,3 +228,20 @@ class TestParserEdgeCases:
         lines = parse_crontab(text)
         assert len(lines) == 1
         assert lines[0].schedule == "*/15 */2 1,15 * *"
+
+    def test_cron_tz_env_var(self):
+        """CRON_TZ and TZ are parsed as env vars with tz validation."""
+        text = "CRON_TZ=Asia/Shanghai\n0 2 * * * /usr/bin/cmd\n"
+        lines = parse_crontab(text)
+        assert len(lines) == 2
+        assert lines[0].line_type == LineType.ENV_VAR
+        assert lines[0].env_name == "CRON_TZ"
+        assert lines[0].env_value == "Asia/Shanghai"
+        assert lines[0].tz_warning is None  # Valid timezone
+
+    def test_invalid_timezone_gives_warning(self):
+        text = "CRON_TZ=Fake/City\n"
+        lines = parse_crontab(text)
+        assert len(lines) == 1
+        assert lines[0].tz_warning is not None
+        assert "无效时区" in lines[0].tz_warning

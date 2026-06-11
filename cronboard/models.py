@@ -34,11 +34,19 @@ class CrontabLine:
     env_name: Optional[str] = None
     env_value: Optional[str] = None
 
+    # Timezone warning (for CRON_TZ/TZ with invalid value)
+    tz_warning: Optional[str] = None
+
     # Runtime state (not persisted)
     last_run: Optional[datetime] = None
     next_run: Optional[datetime] = None
     is_running: bool = False
     pid: Optional[int] = None
+
+    # Track whether this line was modified since parsing
+    _modified: bool = dataclasses.field(default=False, repr=False)
+    # Original enabled state at parse time
+    _original_enabled: bool = dataclasses.field(default=True, repr=False)
 
     @property
     def display_command(self) -> str:
@@ -52,8 +60,24 @@ class CrontabLine:
     def display_schedule(self) -> str:
         return self.schedule or ""
 
-    def to_crontab_line(self) -> str:
+    def mark_modified(self) -> None:
+        """Mark this line as modified (will be reconstructed on serialize)."""
+        self._modified = True
+
+    @property
+    def is_modified(self) -> bool:
+        """Check if the line has been changed since parsing."""
+        if self._modified:
+            return True
         if self.line_type == LineType.CRON_JOB:
+            return self.enabled != self._original_enabled
+        return False
+
+    def to_crontab_line(self) -> str:
+        """Serialize back to crontab text. Preserves raw if unmodified."""
+        if self.line_type == LineType.CRON_JOB:
+            if not self.is_modified:
+                return self.raw
             base = f"{self.schedule} {self.command}"
             if not self.enabled:
                 return f"# {base}"

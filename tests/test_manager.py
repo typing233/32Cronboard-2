@@ -13,6 +13,7 @@ from cronboard.manager import (
     ConcurrentModificationError,
     CrontabError,
     CrontabManager,
+    WriteFailedRolledBack,
 )
 from cronboard.models import CrontabLine, CrontabState, LineType
 from cronboard.parser import parse_crontab, serialize_crontab
@@ -79,6 +80,7 @@ class TestManagerWrite:
         mgr._last_known_text = SAMPLE_CRONTAB
 
         lines = parse_crontab(SAMPLE_CRONTAB)
+        lines[0].enabled = False  # Make a change
         mgr.write_crontab(lines, "test write")
 
         assert mgr.can_undo
@@ -98,6 +100,39 @@ class TestManagerWrite:
         lines = parse_crontab(SAMPLE_CRONTAB)
         with pytest.raises(ConcurrentModificationError):
             mgr.write_crontab(lines)
+
+    @patch("cronboard.manager.subprocess.run")
+    @patch("cronboard.manager.fcntl.flock")
+    def test_write_failure_triggers_rollback(self, mock_flock, mock_run):
+        """When write fails, manager should try to rollback from backup."""
+        mgr = CrontabManager()
+        mgr._last_known_text = SAMPLE_CRONTAB
+
+        write_calls = []
+
+        def side_effect(*args, **kwargs):
+            cmd = args[0]
+            if cmd == ["crontab", "-l"]:
+                return MagicMock(returncode=0, stdout=SAMPLE_CRONTAB, stderr="")
+            if isinstance(cmd, list) and len(cmd) == 2 and cmd[0] == "crontab" and cmd[1] != "-l":
+                write_calls.append(cmd[1])
+                if len(write_calls) == 1:
+                    # First write attempt: fail
+                    return MagicMock(returncode=1, stdout="", stderr="disk full")
+                else:
+                    # Rollback write: succeed
+                    return MagicMock(returncode=0, stdout="", stderr="")
+            return MagicMock(returncode=0, stdout="", stderr="")
+
+        mock_run.side_effect = side_effect
+
+        lines = parse_crontab(SAMPLE_CRONTAB)
+        lines[0].enabled = False
+
+        with pytest.raises(WriteFailedRolledBack, match="回滚"):
+            mgr.write_crontab(lines, "test")
+
+        assert len(write_calls) == 2
 
 
 class TestManagerUndoRedo:
@@ -202,3 +237,23 @@ class TestManagerBackups:
             mgr = CrontabManager()
             backups = mgr.list_backups()
             assert len(backups) == 2
+            # Newest first
+            assert "20240102" in backups[0].name
+
+    def test_get_backup_preview(self, tmp_path):
+        backup_dir = tmp_path / "backups"
+        backup_dir.mkdir()
+        bak = backup_dir / "crontab_20240101_120000.bak"
+        bak.write_text(SAMPLE_CRONTAB)
+
+        with patch("cronboard.manager.BACKUP_DIR", backup_dir):
+            mgr = CrontabManager()
+            content = mgr.get_backup_preview(bak)
+            assert content == SAMPLE_CRONTAB
+
+    def test_backup_created_on_write_returns_path(self, tmp_path):
+        with patch("cronboard.manager.BACKUP_DIR", tmp_path):
+            mgr = CrontabManager()
+            path = mgr._create_backup("test content\n")
+            assert path.exists()
+            assert path.read_text() == "test content\n"

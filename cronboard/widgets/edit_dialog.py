@@ -127,7 +127,7 @@ class EditJobScreen(ModalScreen[CrontabLine | None]):
         if self._existing:
             self._existing.schedule = schedule
             self._existing.command = command
-            self._existing.raw = f"{schedule} {command}"
+            self._existing.mark_modified()
             self.dismiss(self._existing)
         else:
             new_line = CrontabLine(
@@ -137,5 +137,6 @@ class EditJobScreen(ModalScreen[CrontabLine | None]):
                 schedule=schedule,
                 command=command,
                 enabled=True,
+                _modified=True,
             )
             self.dismiss(new_line)

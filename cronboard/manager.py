@@ -35,6 +35,11 @@ class ConcurrentModificationError(CrontabError):
     pass
 
 
+class WriteFailedRolledBack(CrontabError):
+    """Write failed but was successfully rolled back from backup."""
+    pass
+
+
 class CrontabManager:
     """Manages the user's crontab with safety features."""
 
@@ -71,14 +76,17 @@ class CrontabManager:
         return lines
 
     def write_crontab(self, lines: list[CrontabLine], description: str = "") -> None:
-        """Write crontab atomically with locking and backup."""
+        """Write crontab atomically with locking, backup, and auto-rollback on failure."""
         new_text = serialize_crontab(lines)
+        backup_path: Optional[Path] = None
 
         self._acquire_lock()
         try:
             self._check_concurrent_modification()
+
+            # Create backup before writing
             if self._last_known_text is not None:
-                self._create_backup(self._last_known_text)
+                backup_path = self._create_backup(self._last_known_text)
                 self._undo_stack.append(CrontabState(
                     lines=parse_crontab(self._last_known_text),
                     timestamp=datetime.now(),
@@ -86,8 +94,28 @@ class CrontabManager:
                 ))
                 self._redo_stack.clear()
 
-            self._atomic_write(new_text)
-            self._last_known_text = new_text
+            # Attempt atomic write
+            try:
+                self._atomic_write(new_text)
+                self._last_known_text = new_text
+            except CrontabError as write_err:
+                # Write failed — attempt rollback from backup
+                if backup_path and backup_path.exists():
+                    rollback_text = backup_path.read_text(encoding="utf-8")
+                    try:
+                        self._atomic_write(rollback_text)
+                        self._last_known_text = rollback_text
+                        # Remove the undo entry we just added since write failed
+                        if self._undo_stack:
+                            self._undo_stack.pop()
+                        raise WriteFailedRolledBack(
+                            f"写入失败已自动回滚: {write_err}"
+                        ) from write_err
+                    except WriteFailedRolledBack:
+                        raise
+                    except CrontabError:
+                        pass
+                raise
         finally:
             self._release_lock()
 
@@ -186,7 +214,7 @@ class CrontabManager:
         return parse_crontab(text)
 
     def list_backups(self) -> list[Path]:
-        """List available backups sorted by time."""
+        """List available backups sorted by time (newest first)."""
         if not BACKUP_DIR.exists():
             return []
         backups = sorted(BACKUP_DIR.glob("crontab_*.bak"), reverse=True)
@@ -200,6 +228,12 @@ class CrontabManager:
         lines = parse_crontab(text)
         self.write_crontab(lines, description=f"从备份恢复: {backup_path.name}")
         return lines
+
+    def get_backup_preview(self, backup_path: Path) -> str:
+        """Get the content of a backup file for preview."""
+        if not backup_path.exists():
+            raise CrontabError(f"备份文件不存在: {backup_path}")
+        return backup_path.read_text(encoding="utf-8")
 
     def check_running(self, lines: list[CrontabLine]) -> None:
         """Check which cron jobs are currently running."""
@@ -309,8 +343,8 @@ class CrontabManager:
             if tmp_path and os.path.exists(tmp_path):
                 os.unlink(tmp_path)
 
-    def _create_backup(self, text: str) -> None:
-        """Create a timestamped backup."""
+    def _create_backup(self, text: str) -> Path:
+        """Create a timestamped backup. Returns the backup path."""
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         backup_path = BACKUP_DIR / f"crontab_{timestamp}.bak"
         backup_path.write_text(text, encoding="utf-8")
@@ -320,6 +354,8 @@ class CrontabManager:
         while len(backups) > MAX_BACKUPS:
             backups[0].unlink()
             backups.pop(0)
+
+        return backup_path
 
     @property
     def can_undo(self) -> bool:

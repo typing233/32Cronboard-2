@@ -25,18 +25,35 @@ class TestCrontabLine:
         assert len(line.display_command) == 80
         assert line.display_command.endswith("...")
 
-    def test_to_crontab_line_enabled(self):
+    def test_to_crontab_line_enabled_unmodified(self):
+        """Unmodified enabled line preserves raw."""
         line = CrontabLine(
-            raw="0 2 * * * /usr/bin/cmd",
+            raw="0  2  *  *  *  /usr/bin/cmd",
             line_type=LineType.CRON_JOB,
             line_number=1,
-            schedule="0 2 * * *",
+            schedule="0  2  *  *  *",
             command="/usr/bin/cmd",
             enabled=True,
+            _original_enabled=True,
         )
-        assert line.to_crontab_line() == "0 2 * * * /usr/bin/cmd"
+        assert line.to_crontab_line() == "0  2  *  *  *  /usr/bin/cmd"
 
-    def test_to_crontab_line_disabled(self):
+    def test_to_crontab_line_modified(self):
+        """Modified line is reconstructed."""
+        line = CrontabLine(
+            raw="0  2  *  *  *  /usr/bin/cmd",
+            line_type=LineType.CRON_JOB,
+            line_number=1,
+            schedule="0 3 * * *",
+            command="/usr/bin/cmd",
+            enabled=True,
+            _original_enabled=True,
+            _modified=True,
+        )
+        assert line.to_crontab_line() == "0 3 * * * /usr/bin/cmd"
+
+    def test_to_crontab_line_disabled_via_toggle(self):
+        """Toggling enabled to disabled reconstructs with # prefix."""
         line = CrontabLine(
             raw="0 2 * * * /usr/bin/cmd",
             line_type=LineType.CRON_JOB,
@@ -44,8 +61,22 @@ class TestCrontabLine:
             schedule="0 2 * * *",
             command="/usr/bin/cmd",
             enabled=False,
+            _original_enabled=True,
         )
         assert line.to_crontab_line() == "# 0 2 * * * /usr/bin/cmd"
+
+    def test_to_crontab_line_disabled_unmodified(self):
+        """Disabled line that stays disabled preserves raw."""
+        line = CrontabLine(
+            raw="#0 2 * * * /usr/bin/cmd",
+            line_type=LineType.CRON_JOB,
+            line_number=1,
+            schedule="0 2 * * *",
+            command="/usr/bin/cmd",
+            enabled=False,
+            _original_enabled=False,
+        )
+        assert line.to_crontab_line() == "#0 2 * * * /usr/bin/cmd"
 
     def test_to_crontab_line_comment(self):
         line = CrontabLine(
@@ -63,6 +94,34 @@ class TestCrontabLine:
         )
         assert line.to_crontab_line() == ""
 
+    def test_is_modified_flag(self):
+        line = CrontabLine(
+            raw="0 2 * * * /usr/bin/cmd",
+            line_type=LineType.CRON_JOB,
+            line_number=1,
+            schedule="0 2 * * *",
+            command="/usr/bin/cmd",
+            enabled=True,
+            _original_enabled=True,
+        )
+        assert not line.is_modified
+        line.mark_modified()
+        assert line.is_modified
+
+    def test_is_modified_detects_toggle(self):
+        line = CrontabLine(
+            raw="0 2 * * * /usr/bin/cmd",
+            line_type=LineType.CRON_JOB,
+            line_number=1,
+            schedule="0 2 * * *",
+            command="/usr/bin/cmd",
+            enabled=True,
+            _original_enabled=True,
+        )
+        assert not line.is_modified
+        line.enabled = False
+        assert line.is_modified
+
 
 class TestCrontabState:
     def test_to_text(self):
@@ -74,6 +133,7 @@ class TestCrontabState:
                 schedule="0 2 * * *",
                 command="/usr/bin/cmd",
                 enabled=True,
+                _original_enabled=True,
             ),
             CrontabLine(
                 raw="# comment",
