@@ -46,6 +46,7 @@ from .widgets.edit_dialog import EditJobScreen
 from .widgets.host_selector import HostSelector
 from .widgets.job_table import JobTable
 from .widgets.log_viewer import LogViewer
+from .widgets.tag_dialog import TagManageScreen, TagResult
 
 
 class DiffConfirmScreen(ModalScreen[bool]):
@@ -330,7 +331,7 @@ class CronboardApp(App):
                 yield Button("刷新[R]", variant="success", id="btn-refresh")
             with Horizontal(id="search-bar"):
                 yield Input(
-                    placeholder="搜索过滤 (命令、表达式、主机、标签)...",
+                    placeholder="搜索 (关键词 / tag:标签名 按标签过滤)...",
                     id="search-input",
                 )
             yield JobTable(multi_host=self._multi_host, id="job-table")
@@ -496,7 +497,14 @@ class CronboardApp(App):
 
     def on_input_changed(self, event: Input.Changed) -> None:
         if event.input.id == "search-input":
-            self._filter_text = event.value
+            value = event.value
+            # Support tag: prefix for tag filtering
+            if value.lower().startswith("tag:"):
+                self._tag_filter = value[4:].strip()
+                self._filter_text = ""
+            else:
+                self._tag_filter = ""
+                self._filter_text = value
             self._refresh_table()
 
     def on_host_selector_host_changed(self, event: HostSelector.HostChanged) -> None:
@@ -720,8 +728,9 @@ class CronboardApp(App):
                     1 for l in lines if l.line_type == LineType.CRON_JOB
                 )
                 self._update_status(
-                    f"已导入 {job_count} 个任务 (需确认写入)"
+                    f"已导入 {job_count} 个任务，正在确认写入..."
                 )
+                self._confirm_and_write(f"导入 {job_count} 个任务", "localhost")
             except CrontabError as e:
                 self._update_status(f"导入失败: {e}")
         else:
@@ -731,6 +740,7 @@ class CronboardApp(App):
     async def _import_remote(self, host_id: str, path: str) -> None:
         backend = self._get_backend_for_host(host_id)
         if not isinstance(backend, RemoteBackend):
+            self._update_status(f"未找到远程主机: {host_id}")
             return
         try:
             text = Path(path).read_text(encoding="utf-8")
@@ -741,10 +751,18 @@ class CronboardApp(App):
             self._refresh_table()
             job_count = sum(1 for l in lines if l.line_type == LineType.CRON_JOB)
             self._update_status(
-                f"已导入 [{host_id}] {job_count} 个任务 (需确认写入)"
+                f"已导入 [{host_id}] {job_count} 个任务，正在确认写入..."
+            )
+            # Trigger the full confirm-and-write flow
+            self.call_later(
+                lambda: self._confirm_and_write(
+                    f"导入 {job_count} 个任务", host_id
+                )
             )
         except CrontabError as e:
             self._update_status(f"导入失败: {e}")
+        except OSError as e:
+            self._update_status(f"读取导入文件失败: {e}")
 
     def action_view_logs(self) -> None:
         table = self.query_one("#job-table", JobTable)
@@ -760,24 +778,31 @@ class CronboardApp(App):
         backend = self._get_backend_for_host(line.host)
 
         if line.host == "localhost":
-            # For local, read syslog directly
+            # For local, use the same structured readers via subprocess
             import subprocess
 
             try:
                 fragment = line.command.split()[0] if line.command else ""
+                # Try journald first, then syslog
                 result = await asyncio.to_thread(
                     subprocess.run,
-                    ["grep", "-i", fragment, "/var/log/syslog"],
+                    [
+                        "bash", "-c",
+                        f"journalctl -u cron --no-pager -n 40 -o short-precise 2>/dev/null"
+                        f" | grep -i '{fragment}' | tail -20"
+                        f" || grep -i 'CRON' /var/log/syslog 2>/dev/null"
+                        f" | grep -i '{fragment}' | tail -20"
+                    ],
                     capture_output=True,
                     text=True,
-                    timeout=5,
+                    timeout=10,
                 )
-                from .logs.models import LogEntry
-
-                entries = []
-                if result.stdout:
-                    for raw in result.stdout.strip().split("\n")[-20:]:
-                        entries.append(LogEntry(raw_line=raw, source="syslog"))
+                from .logs.reader import SyslogReader
+                reader = SyslogReader()
+                if result.stdout.strip():
+                    entries = reader._parse_and_correlate(result.stdout, 20)
+                else:
+                    entries = []
                 log_viewer.show_logs(line.host, line.command or "", entries)
             except Exception:
                 log_viewer.show_logs(line.host, line.command or "", [])
@@ -807,11 +832,53 @@ class CronboardApp(App):
         if line is None or not line.command:
             self._update_status("请先选择一个任务")
             return
-        # Simple tag input via notification (could be a modal in future)
-        current_tags = ", ".join(line.tags) if line.tags else "无"
-        self._update_status(
-            f"当前标签: {current_tags} (在搜索栏中输入 tag:标签名 进行过滤)"
+        self._open_tag_dialog(line)
+
+    @work(thread=False)
+    async def _open_tag_dialog(self, line: CrontabLine) -> None:
+        all_tags = await self._tags.get_all_tags()
+        self.app.push_screen(
+            TagManageScreen(line, all_tags),
+            lambda result: self._on_tag_result(result, line),
         )
+
+    def _on_tag_result(self, result: TagResult | None, line: CrontabLine) -> None:
+        if result is None:
+            return
+        self._apply_tag_changes(result, line)
+
+    @work(thread=False)
+    async def _apply_tag_changes(
+        self, result: TagResult, line: CrontabLine
+    ) -> None:
+        """Apply tag additions and removals, then refresh UI."""
+        changes_made: list[str] = []
+
+        for tag in result.tags_to_add:
+            await self._tags.add_tag(line.host, line.command, tag)
+            if tag not in line.tags:
+                line.tags.append(tag)
+            changes_made.append(f"+{tag}")
+
+        for tag in result.tags_to_remove:
+            await self._tags.remove_tag(line.host, line.command, tag)
+            if tag in line.tags:
+                line.tags.remove(tag)
+            changes_made.append(f"-{tag}")
+
+        if changes_made:
+            await self._audit.log(
+                host=line.host,
+                operation="tag",
+                description=f"标签变更: {', '.join(changes_made)} | {line.command[:40]}",
+                success=True,
+            )
+            self._refresh_table()
+            self._update_detail(line)
+            current = ", ".join(line.tags) if line.tags else "无"
+            self._update_status(
+                f"标签已更新 ({', '.join(changes_made)}) → 当前: {current}"
+            )
 
     def action_show_audit(self) -> None:
         self._show_audit_panel()
