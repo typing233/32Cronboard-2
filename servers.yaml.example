@@ -1,0 +1,51 @@
+# Cronboard 远程服务器配置示例
+# 文件位置: ~/.config/cronboard/servers.yaml
+version: 1
+
+# 全局默认值 (可被各服务器单独覆盖)
+defaults:
+  port: 22
+  connect_timeout: 10
+  log_source: auto      # auto | syslog | journald | custom
+
+servers:
+  # 示例1: 密钥认证
+  - name: web-01
+    hostname: 192.168.1.10
+    username: deploy
+    private_key_path: ~/.ssh/id_ed25519
+    log_source: journald
+    tags: [production, web]
+
+  # 示例2: 密钥 + passphrase + sudo提权
+  - name: db-master
+    hostname: db.internal.example.com
+    username: admin
+    private_key_path: ~/.ssh/id_rsa
+    passphrase: your-key-passphrase
+    sudo_user: postgres        # 管理 postgres 用户的 crontab
+    log_source: syslog
+    tags: [production, database]
+
+  # 示例3: 通过跳板机连接
+  - name: staging-worker
+    hostname: 10.0.5.20
+    username: ubuntu
+    private_key_path: ~/.ssh/staging_key
+    jump_host:
+      hostname: bastion.example.com
+      port: 2222
+      username: jump-user
+      private_key_path: ~/.ssh/bastion_key
+    log_source: auto
+    custom_log_path: /var/log/app/cron.log
+    tags: [staging, worker]
+
+  # 示例4: 密码认证 (不推荐, 建议使用密钥)
+  - name: legacy-box
+    hostname: old-server.local
+    username: root
+    password: "your-password-here"
+    connect_timeout: 15
+    log_source: syslog
+    tags: [legacy]

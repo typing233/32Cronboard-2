@@ -37,11 +37,17 @@ class CrontabLine:
     # Timezone warning (for CRON_TZ/TZ with invalid value)
     tz_warning: Optional[str] = None
 
+    # Host identification for multi-server support
+    host: str = "localhost"
+    tags: list[str] = dataclasses.field(default_factory=list)
+
     # Runtime state (not persisted)
     last_run: Optional[datetime] = None
     next_run: Optional[datetime] = None
     is_running: bool = False
     pid: Optional[int] = None
+    last_exit_code: Optional[int] = None
+    last_duration: Optional[float] = None
 
     # Track whether this line was modified since parsing
     _modified: bool = dataclasses.field(default=False, repr=False)

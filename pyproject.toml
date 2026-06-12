@@ -1,17 +1,20 @@
 [project]
 name = "cronboard"
-version = "1.0.0"
-description = "Terminal-based cron job manager built with Textual"
+version = "2.0.0"
+description = "Terminal-based cron job manager with remote cluster support"
 requires-python = ">=3.10"
 dependencies = [
     "textual>=0.79.0",
     "croniter>=2.0.0",
+    "paramiko>=3.0.0",
+    "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
 dev = [
     "pytest>=7.0",
     "pytest-asyncio>=0.23.0",
+    "pytest-mock>=3.10.0",
 ]
 
 [project.scripts]
@@ -20,3 +23,6 @@ cronboard = "cronboard.app:main"
 [build-system]
 requires = ["setuptools>=68.0"]
 build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+include = ["cronboard*"]

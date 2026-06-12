@@ -1,3 +1,3 @@
-"""Cronboard - Terminal cron job manager built with Textual."""
+"""Cronboard - Terminal cron job manager with remote cluster support."""
 
-__version__ = "1.0.0"
+__version__ = "2.0.0"
